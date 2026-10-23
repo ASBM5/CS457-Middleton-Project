@@ -20,14 +20,14 @@
 > - There aren't any tie mechanics, as players are taking turns and wouldn't be able to guess at the same time. 
 
 ### 1.1 Game Overview
-- **Chosen Game:** [e.g., Terminal Trivia, Tic-Tac-Toe, Connect Four, Battleship]
-- **Player Capacity:** 2 Players (Simulated via 2 CML Client nodes)
-- **Game Summary:** [Briefly describe the gameplay mechanics and rules]
+- **Chosen Game:** Ward (Wordle)
+- **Player Capacity:** 2 Players
+- **Game Summary:** A Word guessing game where players take turns guessing a secret word. First one to guess correctly wins.
 
 ### 1.2 Core Game Rules & Win/Draw Conditions
-- **Turn Mechanics:** [Explain how turn order is enforced between Player 1 and Player 2]
-- **Victory Condition:** [Define how a player wins the game]
-- **Draw/Tie Condition:** [Define how a draw/tie is detected and handled]
+- **Turn Mechanics:** Whichever player starts the game or connects first will take the first turn. After that each player takes turns guessing the word.
+- **Victory Condition:** Whoever guesses the secret word first wins.
+- **Draw/Tie Condition:** Goes indefinitely, if a player quits, the other player wins.
 
 ---
 
