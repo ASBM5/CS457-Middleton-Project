@@ -14,8 +14,8 @@
 > - There will be blank spaces "_ _ _ _ _" that denote how long a word is, whatever player is first can type in a word and then
 > - the game will tell the player which letters are either in the word, in the correct spot, or if they're not used.
 > - EX. "G U A R D"
-> -     "g r y y r" 
-> - For green, yellow, and red, respectively. And then the next player will have a turn. 
+> -     "green red yellow yellow red" 
+> - Green means the right letter in the right spot, yellow means the right letter in the wrong spot, and red means the letter is not in the word. And then the next player will have a turn. 
 > - Whoever guesses the word first wins. 
 > - There aren't any tie mechanics, as players are taking turns and wouldn't be able to guess at the same time. 
 
@@ -27,7 +27,7 @@
 ### 1.2 Core Game Rules & Win/Draw Conditions
 - **Turn Mechanics:** Whichever player starts the game or connects first will take the first turn. After that each player takes turns guessing the word.
 - **Victory Condition:** Whoever guesses the secret word first wins.
-- **Draw/Tie Condition:** Goes indefinitely, if a player quits, the other player wins.
+- **Draw/Tie Condition:** There are no draws. The game continues until a player guesses the word. If a player quits, loses their connection, or sits idle past the timeout (5 minutes), the other player wins by forfeit.
 
 ---
 
@@ -35,19 +35,20 @@
 
 ### 2.1 Message Transport & Serialization Format
 - **Transport Protocol:** TCP
-- **Serialization Format:** [JSON / Fixed-Header Binary / Delimited Text]
-- **Framing Mechanism:** [e.g., Newline-delimited (`\n`) JSON payloads OR 4-byte big-endian length prefix]
+- **Serialization Format:** JSON, encoded as UTF-8. Every message has the fields `msg_type`, `player_id`, `payload`, and `timestamp`.
+- **Framing Mechanism:** Newline-delimited JSON (NDJSON). Each message is one line ending in `\n`, at most 1024 bytes. The receiver buffers incoming bytes and parses only after a newline arrives, which handles TCP fragmentation and coalescing. See `protocol_blueprint.md` for the full schemas.
 
 ### 2.2 Message Schema Definitions
 
 #### Message Types:
-1. `CONNECT` (Client -> Server): Request to join the game room.
-2. `LOBBY_WAIT` (Server -> Client): Notification that server is waiting for Player 2.
-3. `GAME_START` (Server -> Clients): Game initiated, assigns roles (e.g. Player X vs Player O).
-4. `MOVE` (Client -> Server): Player action (e.g., cell coordinates or answer choice).
-5. `STATE_UPDATE` (Server -> Clients): Broadcast current game board / state and active player turn.
-6. `GAME_OVER` (Server -> Clients): Victory / Draw notification with final scores.
-7. `ERROR` (Server -> Client): Invalid move or malformed packet error.
+1. `CONNECT` (Client -> Server): Request to join the game with an alias.
+2. `LOBBY_WAIT` (Server -> Client): Assigns `Player_1` and notifies the client that the server is waiting for `Player_2`.
+3. `GAME_START` (Server -> Clients): Game initiated. Assigns each client its `Player_1` or `Player_2` identifier and gives the word length, starting player (`Player_1`), and turn number.
+4. `MOVE` (Client -> Server): Submit a word guess for the current turn.
+5. `STATE_UPDATE` (Server -> Clients): Broadcast the feedback (`GREEN`, `YELLOW`, `RED`) for the guess, the next active player, and the game status (`ACTIVE` or `COMPLETE`).
+6. `ERROR` (Server -> Client): Rejected request, with a code such as `INVALID_TURN` or `ROOM_FULL`.
+7. `DISCONNECT` (Client -> Server): Notifies the server of an intentional quit. The opponent wins by forfeit.
+8. `GAME_OVER` (Server -> Clients): Announces the winner (`Player_1` or `Player_2`), the reason (`CORRECT_GUESS` or `FORFEIT`), and the hidden word.
 
 #### Example JSON Protocol Schema:
 ```json
@@ -55,29 +56,42 @@
   "msg_type": "MOVE",
   "player_id": "Player_1",
   "payload": {
-    "row": 0,
-    "col": 2
+    "turn": 1,
+    "guess": "GUARD"
   },
-  "timestamp": 1727000000
+  "timestamp": 1790787610
 }
 ```
 
 ---
 
 ### 2.3 Game State Machine (FSM) Design (Sprint 1 Deliverable)
-- **State Transitions:** Detail state flow: `INIT` -> `WAITING_FOR_PLAYERS` -> `PLAYER_TURN` -> `EVALUATE_MOVE` -> `CHECK_WIN_DRAW` -> `GAME_OVER` -> `CLEANUP`.
+- **State Transitions:** `INIT` -> `WAITING_FOR_PLAYERS` -> `GAME_START` -> `PLAYER_TURN` -> `EVALUATE_MOVE` -> `GAME_OVER` -> `CLEANUP` -> `WAITING_FOR_PLAYERS`.
+  - Win checking happens inside `EVALUATE_MOVE`: a wrong guess returns to `PLAYER_TURN` with the other player active, and a correct guess moves to `GAME_OVER`.
+  - Invalid or out-of-turn moves send an `ERROR` and stay in `PLAYER_TURN`.
+  - A disconnect during `GAME_START` or `PLAYER_TURN` awards a forfeit victory to the remaining player and moves to `GAME_OVER`. A disconnect in `WAITING_FOR_PLAYERS` just releases the player's slot.
+  - After `CLEANUP`, players must open a new connection and send `CONNECT` to play again.
+  - See `fsm_specification.md` for the full state diagram and transition table.
 
 ---
 
 ## 3. Game Behavior & Server Concurrency Architecture (Sprint 2 Deliverable)
 
+Full details are in `concurrency_design.md`, which also contains the Mermaid sequence diagram showing every protocol message.
+
 ### 3.1 Server Concurrency Strategy
-- **Architecture Choice:** [Multi-Threading (`threading.Thread`) OR Non-blocking I/O multiplexing (`select.select` / `selectors`)]
-- **Synchronization Logic:** Explain how shared game state and client list are thread-safe (e.g. `threading.Lock`) to prevent race conditions during turn processing.
+- **Architecture Choice:** Multi-Threading (`threading.Thread`). The main thread only calls `accept()`, and each connected client gets its own worker thread for the life of the match. A slow or silent client never blocks the main loop or the other player. Threading was chosen over `selectors` because Ward has only two players, and a blocking `recv()` loop per client keeps the newline-delimited JSON (NDJSON) receive buffer simple.
+- **Synchronization Logic:** All shared state is protected by a single `threading.RLock` named `game_lock`. The shared state is the FSM state, `active_player`, `current_turn`, the hidden word, the connected client list and player assignments, `match_result`, and the per-player `disconnected` flags.
+  - `recv()`, receive-buffer handling, and message parsing happen outside the lock.
+  - Validation, state changes, and broadcasts happen together inside one `with game_lock:` block, so only one worker thread can change game state at a time.
+  - Player assignment and the `ROOM_FULL` check also run under the lock, so two simultaneous `CONNECT` messages cannot both become `Player_1`.
+  - Every disconnect goes through one `handle_disconnect()` routine that checks a per-player flag under the lock, so a `DISCONNECT` followed by EOF causes only one forfeit.
+  - A reentrant lock is used so a disconnect detected during a broadcast does not deadlock.
+  - Sockets use a timeout (`IDLE_TIMEOUT_SECONDS`) so a send inside the lock cannot block forever.
 
 ### 3.2 State & Score Synchronization Across Clients
-- **Turn Enforcement:** Detail how the server validates active player ID before processing moves and broadcasts updated turn notifications to all clients.
-- **Score & Board Synchronization:** Describe how state broadcasts keep client screens synchronized in real time.
+- **Turn Enforcement:** The server validates every `MOVE` inside `game_lock`, in this order: server phase (`INVALID_PHASE`), that `player_id` matches the connection (`INVALID_PLAYER`), that the sender is the active player and the `turn` value matches the current turn (`INVALID_TURN`), and that the guess has the right length and only letters (`INVALID_GUESS`). A rejected move sends an `ERROR` to the sender only and leaves game state unchanged, so an out-of-turn move can never corrupt turn ownership. After a valid but incorrect guess, the server switches the active player and sends a `STATE_UPDATE` with `next_player` to both clients.
+- **Score & Board Synchronization:** Ward has no board and no points system, so the "score" of a match is its result: the winner and the reason (`CORRECT_GUESS` or `FORFEIT`). The server stores this as `match_result` in memory, written once under `game_lock`. Each `STATE_UPDATE` carries the guess feedback (`GREEN`, `YELLOW`, `RED`) and is sent to both players while the lock is held, so both see updates in the same order. When the match ends, the server sends a final `STATE_UPDATE` with `game_status` `COMPLETE`, then `GAME_OVER` (`winner`, `reason`, `hidden_word`) to every connected player. Clients only display server-provided state. After `GAME_OVER` the server runs `CLEANUP`, and players must open a new connection and send `CONNECT` to play again.
 
 ---
 
