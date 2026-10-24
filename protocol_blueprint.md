@@ -2,7 +2,7 @@
 
 **Student:** Atlas Middleton  
 **Course:** CS457  
-**Date:** 10/4/2026
+**Date:** 10/24/2026
 
 ---
 
@@ -32,11 +32,13 @@ Player Guess: GUARD
 
 The player who correctly guesses the hidden word immediately wins the game.
 
-Players alternate turns throughout the game. Only the active player may submit a guess during their turn.
+Players alternate turns throughout the game. `Player_1` always takes the first turn. Only the active player may submit a guess during their turn.
 
 A player wins by forfeit if the opponent disconnects or loses their connection during the game.
 
 The game supports a maximum of two players. Additional connection attempts are rejected.
+
+After a match ends, the server closes the client connections. Players must open a new connection and send `CONNECT` to play again.
 
 ---
 
@@ -64,6 +66,17 @@ recv() #2:
 ARD"},"timestamp":1790787610}\n
 ```
 
+## Protocol Constants
+
+| Constant | Value | Meaning |
+| --- | --- | --- |
+| `WORD_LENGTH` | `5` | Length of the hidden word and of every valid guess |
+| `MAX_MESSAGE_BYTES` | `1024` | Maximum size of one message, including the trailing `\n` |
+| `MAX_ALIAS_LENGTH` | `20` | Maximum length of `alias` |
+| `IDLE_TIMEOUT_SECONDS` | `300` | A client that sends nothing for this long is treated as disconnected |
+
+The server enforces `MAX_MESSAGE_BYTES` on the receive buffer. If the buffer grows past the limit without a newline arriving, the message is too large.
+
 ---
 
 # 3. Shared Message Fields
@@ -75,22 +88,26 @@ Every protocol message contains the following required fields:
 | `msg_type` | String | Message type |
 | `player_id` | String or null | Sender id |
 | `payload` | Object | Message's info |
-| `timestamp` | Integer | Timestamp for logging |
+| `timestamp` | Integer | Unix time in seconds, used for logging only |
 
-Unknown or missing fields, incorrect types, and other bad values are rejected.
+Unknown or missing fields, incorrect types, and other bad values are rejected with `INVALID_MESSAGE`.
+
+Messages sent by the server use `"SERVER"` as `player_id`.
 
 ## Message Types
 
 | Message Type | Direction | Purpose |
 | --- | --- | --- |
 | `CONNECT` | Client → Server | Request to join with an alias |
-| `LOBBY_WAIT` | Server → Client | Assign Player 1 and wait for an opponent |
+| `LOBBY_WAIT` | Server → Client | Assign `Player_1` and wait for an opponent |
 | `GAME_START` | Server → Clients | Start game and assign turn order |
 | `MOVE` | Client → Server | Submit a word guess |
 | `STATE_UPDATE` | Server → Clients | Send feedback and updated game state |
 | `ERROR` | Server → Client | Explain an action was rejected |
 | `DISCONNECT` | Client → Server | Notify the server of an intentional quit |
 | `GAME_OVER` | Server → Clients | Announce winner or forfeit |
+
+Clients send only `CONNECT`, `MOVE`, and `DISCONNECT`. Any other `msg_type` received by the server is rejected with `INVALID_MESSAGE`.
 
 ---
 
@@ -107,6 +124,10 @@ Unknown or missing fields, incorrect types, and other bad values are rejected.
 | Field | Type |
 | --- | --- |
 | `alias` | String |
+
+`alias` is a display name used for server logging only. It is not sent to the opponent and does not affect the game. It must be a non-empty string of at most `MAX_ALIAS_LENGTH` characters. An invalid alias is rejected with `INVALID_MESSAGE`. Aliases do not need to be unique.
+
+A `CONNECT` from a client that has already joined is rejected with `INVALID_PHASE`.
 
 ### Example
 
@@ -127,7 +148,7 @@ Unknown or missing fields, incorrect types, and other bad values are rejected.
 
 **Direction:** Server → Client
 
-**Purpose:** Assign Player 1 and wait for Player 2.
+**Purpose:** Assign `Player_1` and wait for `Player_2`.
 
 ### Payload Fields
 
@@ -167,6 +188,8 @@ Unknown or missing fields, incorrect types, and other bad values are rejected.
 | `starting_player` | String |
 | `turn` | Integer |
 
+`starting_player` is always `Player_1`, and `turn` always starts at `1`.
+
 ### Example
 
 ```json
@@ -200,6 +223,10 @@ The second player receives the same information with their assigned player ID.
 | `turn` | Integer |
 | `guess` | String |
 
+`turn` must equal the server's current turn number (see Section 5).
+
+`guess` is case-insensitive. The server converts it to uppercase before evaluating it, and all guesses echoed back by the server are uppercase.
+
 ### Example
 
 ```json
@@ -231,10 +258,17 @@ Only the active player may submit a `MOVE`.
 | `completed_turn` | Integer |
 | `guess` | String |
 | `feedback` | Array[String] |
-| `next_player` | String |
+| `next_player` | String or null |
 | `game_status` | String |
 
-### Example
+### `game_status` Values
+
+| Value | Meaning | `next_player` |
+| --- | --- | --- |
+| `ACTIVE` | The guess was wrong and the game continues. | The player whose turn is next |
+| `COMPLETE` | The guess was correct and the game is over. A `GAME_OVER` message follows. | `null` |
+
+### Example (Game Continues)
 
 ```json
 {
@@ -254,6 +288,29 @@ Only the active player may submit a `MOVE`.
     "game_status": "ACTIVE"
   },
   "timestamp": 1790787615
+}
+```
+
+### Example (Correct Guess)
+
+```json
+{
+  "msg_type": "STATE_UPDATE",
+  "player_id": "SERVER",
+  "payload": {
+    "completed_turn": 2,
+    "guess": "GRAPE",
+    "feedback": [
+      "GREEN",
+      "GREEN",
+      "GREEN",
+      "GREEN",
+      "GREEN"
+    ],
+    "next_player": null,
+    "game_status": "COMPLETE"
+  },
+  "timestamp": 1790787624
 }
 ```
 
@@ -287,6 +344,22 @@ Clients should update their displays using only server-provided state.
   "timestamp": 1790787616
 }
 ```
+
+### Example (Room Full)
+
+```json
+{
+  "msg_type": "ERROR",
+  "player_id": "SERVER",
+  "payload": {
+    "code": "ROOM_FULL",
+    "message": "Two players are already connected."
+  },
+  "timestamp": 1790787617
+}
+```
+
+`ROOM_FULL` is an error code carried by an `ERROR` message. It is not a separate message type.
 
 ---
 
@@ -335,9 +408,13 @@ Clients that disconnect before receiving a player ID use:
 
 | Field | Type |
 | --- | --- |
-| `winner` | String or null |
+| `winner` | String |
 | `reason` | String |
 | `hidden_word` | String |
+
+`winner` is always `Player_1` or `Player_2`. If both players disconnect before a winner exists, no `GAME_OVER` is sent because no client is left to receive it.
+
+`reason` is `CORRECT_GUESS` or `FORFEIT`.
 
 ### Example (Correct Guess)
 
@@ -375,34 +452,57 @@ Clients that disconnect before receiving a player ID use:
 
 The server assigns available player slots in connection order.
 
-The first player is assigned:
+The first client to send `CONNECT` is assigned:
 
 ```text
 Player_1
 ```
 
-and enters the lobby wait state until a second player joins.
+and enters the lobby wait state until a second player joins. The second client to send `CONNECT` is assigned `Player_2`.
 
-A third connection attempt receives:
+If a `CONNECT` arrives while two players are already assigned, the server sends `ERROR` with code `ROOM_FULL` and closes that connection. This applies in every server state. Only assigned players count toward the limit, so a connection that has not yet sent `CONNECT` does not use up a slot.
+
+## Validation Order
+
+The server checks every incoming message in this order and rejects it with the first error that applies. A rejected message never changes game state.
+
+| Order | Check | Error Code |
+| --- | --- | --- |
+| 1 | Message size is within `MAX_MESSAGE_BYTES` | `MESSAGE_TOO_LARGE` |
+| 2 | Valid UTF-8 and JSON, known `msg_type`, required fields present with correct types | `INVALID_MESSAGE` |
+| 3 | Message is allowed in the current server state | `INVALID_PHASE` |
+| 4 | `player_id` matches the connection and the player has joined | `INVALID_PLAYER` |
+| 5 | Sender is the active player and `turn` matches the current turn | `INVALID_TURN` |
+| 6 | Guess has `WORD_LENGTH` letters and contains only letters `A` to `Z` (case-insensitive) | `INVALID_GUESS` |
+
+Checks 5 and 6 apply only to `MOVE`. A `MOVE` is allowed only in `PLAYER_TURN`, so a `MOVE` sent before `GAME_START`, or after `GAME_OVER`, receives `INVALID_PHASE`. A `MOVE` from the non-active player during `PLAYER_TURN` receives `INVALID_TURN`.
+
+Guesses are not checked against a dictionary. Any string of `WORD_LENGTH` letters is a valid guess.
+
+## Turn Numbering
+
+The server keeps a turn counter that starts at `1` in `GAME_START`. A `MOVE` must carry the current value in its `turn` field. After each valid guess that does not win the game, the server increments the counter. A `STATE_UPDATE` reports the turn that was just played in `completed_turn`. A `MOVE` with the wrong `turn` value receives `INVALID_TURN`.
+
+## Feedback Rules
+
+Feedback has one entry per letter, in guess order. The server computes it in two passes so repeated letters are handled consistently:
+
+1. **Greens:** mark every position where the guess letter equals the hidden word letter at that position as `GREEN`, and set those hidden letters aside.
+2. **Yellows:** for each remaining guess letter, from left to right, mark it `YELLOW` if the same letter is still unused among the hidden word's remaining letters, and use that letter up. Otherwise mark it `RED`.
+
+Example:
 
 ```text
-ROOM_FULL
+Hidden Word: GRAPE
+
+Player Guess: APPLE
 ```
 
-and is disconnected.
+| A | P | P | L | E |
+| --- | --- | --- | --- | --- |
+| YELLOW | YELLOW | RED | RED | GREEN |
 
-## MOVE Validation
-
-The server verifies:
-
-- Player is connected
-- Player ID matches the connection
-- Guess occurs during the active turn
-- Guess length matches the configured word length
-- Guess contains only alphabetic characters
-- Message schema is valid
-
-Invalid requests generate an `ERROR` response and do not change the game state.
+The hidden word contains only one `P`, so the second `P` is `RED`.
 
 ## Turn Rules
 
@@ -420,7 +520,7 @@ When a correct guess occurs:
 
 1. The server records the winner.
 2. The game ends immediately.
-3. A `GAME_OVER` message is broadcast.
+3. A final `STATE_UPDATE` with `game_status` `COMPLETE` is broadcast, followed by `GAME_OVER`.
 
 ## Error Codes
 
@@ -429,14 +529,14 @@ When a correct guess occurs:
 | `INVALID_MESSAGE` | Invalid JSON, missing fields, or malformed payload |
 | `INVALID_PLAYER` | Unknown player or connection mismatch |
 | `INVALID_GUESS` | Invalid word length or invalid characters |
-| `INVALID_TURN` | Guess submitted out of turn |
+| `INVALID_TURN` | Guess submitted out of turn, or `turn` value does not match |
 | `INVALID_PHASE` | Message not allowed in the current state |
 | `ROOM_FULL` | Maximum players already connected |
-| `MESSAGE_TOO_LARGE` | Message exceeds maximum size |
+| `MESSAGE_TOO_LARGE` | Message exceeds `MAX_MESSAGE_BYTES` |
 
 Ordinary protocol violations do not terminate the connection.
 
-`ROOM_FULL` and `MESSAGE_TOO_LARGE` may result in immediate connection closure.
+`ROOM_FULL` and `MESSAGE_TOO_LARGE` result in immediate connection closure. If the closed connection belongs to a player in an active match, the closure is handled as a disconnect (see Section 6).
 
 ---
 
@@ -496,6 +596,10 @@ TimeoutError
 
 These conditions are treated as unexpected disconnects.
 
+## Idle Timeout
+
+Each client socket uses a receive timeout of `IDLE_TIMEOUT_SECONDS`. A client that sends nothing for that long raises `TimeoutError` and is treated as disconnected. The timeout is long enough that a player thinking about a guess is not disconnected.
+
 ## Disconnect During Lobby
 
 If a player disconnects before the game begins:
@@ -509,7 +613,7 @@ If a player disconnects before the game begins:
 If a player disconnects during an active game:
 
 1. The opponent immediately wins by forfeit.
-2. The server sends `GAME_OVER`.
+2. The server sends `GAME_OVER` with `reason` `FORFEIT`.
 3. Match data is finalized.
 4. Resources are released.
 
@@ -517,12 +621,20 @@ If a player disconnects during an active game:
 
 During cleanup the server:
 
-- Closes all sockets
+- Closes all client sockets (the listening socket stays open)
 - Clears receive buffers
 - Removes stored game data
 - Clears turn history
 - Resets lobby state
 
+The server sends `GAME_OVER` completely (for example with `sendall()`) before it closes the client sockets, so the final message is not lost.
+
 Disconnect events are processed only once.
 
-After cleanup the server becomes available for a new match.
+After cleanup the server becomes available for a new match. Players must open new connections and send `CONNECT` again.
+
+---
+
+# 7. Concurrency
+
+The server handles each client in its own thread. See `concurrency_design.md` for the threading model, the `game_lock` locking rules, and the message flow diagram.
