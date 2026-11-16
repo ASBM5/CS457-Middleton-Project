@@ -28,7 +28,7 @@ Player Guess: GUARD
 
 | G | U | A | R | D |
 | --- | --- | --- | --- | --- |
-| GREEN | RED | YELLOW | YELLOW | RED |
+| GREEN | RED | GREEN | YELLOW | RED |
 
 The player who correctly guesses the hidden word immediately wins the game.
 
