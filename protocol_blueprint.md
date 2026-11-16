@@ -280,7 +280,7 @@ Only the active player may submit a `MOVE`.
     "feedback": [
       "GREEN",
       "RED",
-      "YELLOW",
+      "GREEN",
       "YELLOW",
       "RED"
     ],
@@ -396,6 +396,8 @@ Clients that disconnect before receiving a player ID use:
 }
 ```
 
+This includes a client that sends `DISCONNECT` immediately after `CONNECT`, before the `LOBBY_WAIT` or `GAME_START` message carrying its player ID has arrived (as in the coalescing example in Section 2). The server accepts a `DISCONNECT` whose `player_id` is either `null` or the ID assigned to that connection. Any other value is rejected with `INVALID_PLAYER`.
+
 ---
 
 ## GAME_OVER
@@ -475,7 +477,7 @@ The server checks every incoming message in this order and rejects it with the f
 | 5 | Sender is the active player and `turn` matches the current turn | `INVALID_TURN` |
 | 6 | Guess has `WORD_LENGTH` letters and contains only letters `A` to `Z` (case-insensitive) | `INVALID_GUESS` |
 
-Checks 5 and 6 apply only to `MOVE`. A `MOVE` is allowed only in `PLAYER_TURN`, so a `MOVE` sent before `GAME_START`, or after `GAME_OVER`, receives `INVALID_PHASE`. A `MOVE` from the non-active player during `PLAYER_TURN` receives `INVALID_TURN`.
+Checks 5 and 6 apply only to `MOVE`. In check 4, a `DISCONNECT` may carry `player_id` `null` (see `DISCONNECT` in Section 4). A `MOVE` is allowed only in `PLAYER_TURN`, so a `MOVE` sent before `GAME_START`, or after `GAME_OVER`, receives `INVALID_PHASE`. A `MOVE` from the non-active player during `PLAYER_TURN` receives `INVALID_TURN`.
 
 Guesses are not checked against a dictionary. Any string of `WORD_LENGTH` letters is a valid guess.
 
